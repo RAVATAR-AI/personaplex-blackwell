@@ -15,6 +15,20 @@ PersonaPlex is a real-time, full-duplex speech-to-speech conversational model th
 
 ## Usage
 
+### Prerequisites
+
+Install the [Opus audio codec](https://github.com/xiph/opus) development library:
+```bash
+# Ubuntu/Debian
+sudo apt install libopus-dev
+
+# Fedora/RHEL
+sudo dnf install opus-devel
+
+# macOS
+brew install opus
+```
+
 ### Installation
 
 Download this repository and set up the environment:
@@ -36,8 +50,8 @@ Blackwell GPUs require PyTorch with CUDA 12.8. Install PyTorch first, then the m
 conda create -n personaplex python=3.10 -y
 conda activate personaplex
 
-# Install PyTorch with CUDA 12.8 FIRST
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# Install PyTorch with CUDA 13.0 FIRST
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # Then install the moshi package (will use existing PyTorch)
 pip install moshi/.
@@ -60,6 +74,11 @@ Launch server for live interaction (temporary SSL certs for https):
 SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
 ```
 
+**CPU Offload:** If your GPU has insufficient memory, use the `--cpu-offload` flag to offload model layers to CPU. This requires the `accelerate` package (`pip install accelerate`):
+```bash
+SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --cpu-offload
+```
+
 Access the Web UI from a browser at `localhost:8998` if running locally, otherwise look for the access link printed by the script:
 ```
 Access the Web UI directly at https://11.54.401.33:8998
@@ -68,6 +87,8 @@ Access the Web UI directly at https://11.54.401.33:8998
 ### Offline Evaluation
 
 For offline evaluation use the offline script that streams in an input wav file and produces an output wav file from the captured output stream. The output file will be the same duration as the input file.
+
+Add `--cpu-offload` to any command below if your GPU has insufficient memory (requires `accelerate` package). Or install cpu-only PyTorch for offline evaluation on pure CPU.
 
 **Assistant example:**
 ```bash
