@@ -373,3 +373,264 @@ If you use PersonaPlex in your research, please cite our paper:
   year={2026}
 }
 ```
+
+
+
+---
+
+## Artem Ravatar — Practical Production Notes
+
+*(Prompt Override, System Tags, Custom UI, and Custom Voice Cloning)*
+
+This section documents **non-obvious but critical steps** discovered while running PersonaPlex in a controlled, production-style setup (strict topic control, custom voices, and custom UI).
+These steps are required if you want predictable prompting behavior and reliable visibility of custom voices in the Web UI.
+
+---
+
+## 1. Server-Side Prompt Override (Ignore UI Prompt)
+
+**Goal:** Enforce a backend-controlled system prompt regardless of what the Web UI sends.
+
+### File to edit
+
+```
+moshi/moshi/server.py
+```
+
+### Replace the default UI-driven prompt logic
+
+**Original behavior:**
+
+```python
+self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+    wrap_with_system_tags(request.query["text_prompt"])
+) if len(request.query["text_prompt"]) > 0 else None
+```
+
+**Replace with (server-enforced prompt):**
+
+```python
+server_prompt = (
+    "You are Ruslan.\n"
+    "We are mid-conversation. Do not greet. Do not introduce yourself.\n"
+    "Do not role-play any job, service, or organization.\n"
+    "Single-topic mode: Fertility and reproductive health only.\n"
+    "If the user asks anything outside fertility, reply exactly:\n"
+    "\"I can only discuss fertility and reproductive health.\"\n"
+    "Then ask one short fertility-related question and stop.\n"
+    "Do not use words like helpline, hotline, calling, assist.\n"
+)
+
+# Ignore UI text_prompt entirely
+final_prompt = server_prompt
+
+self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(
+    wrap_with_system_tags(final_prompt)
+)
+```
+
+**Optional (debug logging):**
+
+```python
+clog.log("info", f"FINAL system prompt (first 400 chars): {final_prompt[:400]}")
+```
+
+---
+
+## 2. Fix System Tags (Important)
+
+PersonaPlex responds more reliably when `<system>` tags are **properly closed**.
+
+### File to edit
+
+```
+moshi/moshi/server.py
+```
+
+### Replace `wrap_with_system_tags`
+
+**Before:**
+
+```python
+return f"<system> {cleaned} <system>"
+```
+
+**After (required):**
+
+```python
+def wrap_with_system_tags(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("<system>") and cleaned.endswith("</system>"):
+        return cleaned
+    return f"<system>\n{cleaned}\n</system>"
+```
+
+---
+
+## 3. IMPORTANT: Custom UI Is REQUIRED to See Custom Voices
+
+⚠️ **This is critical and not obvious from the default documentation**
+
+Custom voices may load correctly in the backend (visible via `/api/voices`) but **will not reliably appear in the default HuggingFace UI**.
+
+➡️ **Always use a custom UI build (`client/dist`)**
+The server automatically prefers it if present.
+
+---
+
+## 4. Build and Run the Custom UI
+
+### Install Node.js (Ubuntu)
+
+```bash
+sudo apt update
+sudo apt install -y nodejs npm
+```
+
+Verify installation:
+
+```bash
+node -v
+npm -v
+```
+
+### Build the UI
+
+From the repository root:
+
+```bash
+cd client
+npm ci
+npm run build
+cd ..
+```
+
+This creates:
+
+```
+client/dist/
+```
+
+### Start server (custom UI auto-detected)
+
+```bash
+SSL_DIR=$(mktemp -d)
+python -m moshi.server --ssl "$SSL_DIR"
+```
+
+### Verify in logs
+
+You **must** see:
+
+```
+Found custom UI at .../client/dist, using it instead of default
+```
+
+If you see:
+
+```
+retrieving the static content
+```
+
+then the custom UI is **not** being used.
+
+---
+
+## 5. Custom Voice Cloning (End-to-End)
+
+PersonaPlex selects voices using **`.pt` embeddings**.
+`.wav` files are used only to generate embeddings.
+
+### Step 1 — Prepare audio
+
+Recommended format: **mono, 24kHz WAV**
+
+```bash
+ffmpeg -i voice_Ruslan.wav -ac 1 -ar 24000 voice_Ruslan_24k.wav
+```
+
+**Recording length:**
+~10–20 seconds of clean speech is usually optimal. Longer recordings are not necessarily better.
+
+---
+
+### Step 2 — Copy WAV into the model voices directory
+
+```bash
+cp voice_Ruslan_24k.wav \
+~/.cache/huggingface/hub/models--nvidia--personaplex-7b-v1/snapshots/*/voices/
+```
+
+> Offline embedding generation resolves `--voice-prompt` relative to this directory.
+
+---
+
+### Step 3 — Generate the `.pt` embedding
+
+Run **from the repository root**:
+
+```bash
+python -m moshi.offline \
+  --voice-prompt "voice_Ruslan_24k.wav" \
+  --save-voice-embeddings \
+  --input-wav "assets/test/input_assistant.wav" \
+  --output-wav "/tmp/test_output.wav" \
+  --output-text "/tmp/test_output.json"
+```
+
+This creates:
+
+```
+voice_Ruslan_24k.pt
+```
+
+in the same `voices/` directory.
+
+---
+
+### Step 4 — Restart server
+
+```bash
+SSL_DIR=$(mktemp -d)
+python -m moshi.server --ssl "$SSL_DIR"
+```
+
+---
+
+### Step 5 — Verify voice is loaded (backend)
+
+```bash
+curl -k https://localhost:8998/api/voices | head
+```
+
+If your `.pt` file appears in the JSON output, the backend is loading it correctly.
+
+---
+
+### Step 6 — Verify voice appears in the UI
+
+* Open the Web UI
+* **Hard refresh**:
+
+  * Linux / Windows: `Ctrl + F5`
+  * macOS: `Cmd + Shift + R`
+* Open the **voice selector**
+* Custom voices appear under **category: custom**
+
+⚠️ If you do **not** use the custom UI, the voice may load but **not appear visually**.
+
+---
+
+## 6. Known Limitations (Important)
+
+* Prompting **biases behavior**, but **cannot guarantee absolute topic enforcement** in a full-duplex conversational model.
+* Voice prompts control **acoustic identity**, not semantic rules.
+* Emotional instructions such as *“crying”* or *“sad”* are **not guaranteed** unless encoded in the voice embedding itself.
+* For absolute topic enforcement, a lightweight **token-level gate** (string check on already-generated text) is required.
+
+---
+
+**— Artem Ravatar**
+
+---
+
